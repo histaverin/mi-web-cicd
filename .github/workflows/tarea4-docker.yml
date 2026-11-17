@@ -1,0 +1,111 @@
+name: Tarea 4 - Despliegue en Docker
+
+# Se ejecuta al subir este workflow (o a mano desde la pestaña Actions)
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - ".github/workflows/tarea4-docker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  despliegue_docker:
+    name: Despliegue y verificacion del contenedor
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar codigo
+        uses: actions/checkout@v4
+
+      # 4.2. Construcción de la imagen
+      - name: Construir la imagen (docker build)
+        run: docker build -t mi-web-node:v1 .
+
+      - name: Verificar la imagen (docker images)
+        run: docker images mi-web-node
+
+      # 4.3. Despliegue del contenedor: puerto 8080 del anfitrión -> 3000 del contenedor
+      - name: Desplegar el contenedor (docker run)
+        run: docker run -d --name app-produccion -p 8080:3000 mi-web-node:v1
+
+      - name: Comprobar que el contenedor esta activo (docker ps)
+        run: |
+          sleep 2
+          docker ps
+
+      # 4.4. Comprobación de funcionamiento
+      - name: Comprobar la respuesta HTTP (curl)
+        run: curl -i --retry 5 --retry-connrefused http://localhost:8080
+
+      # Capturas reales: terminal (xterm) y navegador (Google Chrome) sobre una pantalla virtual (Xvfb)
+      - name: Capturas de terminal y navegador
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb xterm x11-utils imagemagick fonts-dejavu-core > /dev/null
+          mkdir -p capturas
+
+          Xvfb :99 -screen 0 1280x720x24 &
+          export DISPLAY=:99
+          sleep 2
+
+          # Terminal: docker images, docker ps y curl contra el contenedor
+          cat > /tmp/terminal.sh << 'EOF'
+          #!/bin/bash
+          cd "$GITHUB_WORKSPACE"
+          P="$(whoami)@$(hostname -s):~/mi-web-cicd\$"
+          run() { printf '\033[1;32m%s\033[0m %s\n' "$P" "$*"; eval "$*"; echo; }
+          clear
+          run "docker images mi-web-node"
+          run "docker ps"
+          run "curl -i http://localhost:8080"
+          printf '\033[1;32m%s\033[0m ' "$P"
+          touch /tmp/terminal_listo
+          sleep 120
+          EOF
+          chmod +x /tmp/terminal.sh
+          xterm -T "Terminal - mi-web-cicd" -geometry 150x30+0+0 -fa "DejaVu Sans Mono" -fs 10 \
+                -bg "#1e1e1e" -fg "#e6e6e6" -e /tmp/terminal.sh &
+          for i in $(seq 1 30); do [ -f /tmp/terminal_listo ] && break; sleep 1; done
+          sleep 2
+          WID=$(xwininfo -name "Terminal - mi-web-cicd" | awk '/Window id/{print $4}')
+          import -window "$WID" capturas/05_terminal_docker_ps.png
+          pkill xterm || true
+
+          # Navegador: Google Chrome cargando http://localhost:8080
+          google-chrome --no-first-run --no-default-browser-check --disable-default-apps \
+                        --user-data-dir=/tmp/chrome-perfil --password-store=basic \
+                        --window-position=0,0 --window-size=1280,720 \
+                        http://localhost:8080 > /dev/null 2>&1 &
+          sleep 10
+          import -window root capturas/06_navegador_localhost.png
+          pkill chrome || true
+          ls -la capturas
+
+      - name: Guardar capturas como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: capturas-tarea4
+          path: capturas/
+
+      - name: Publicar capturas en la rama evidencias-tarea4
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd capturas
+          git init -q -b evidencias-tarea4
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add *.png
+          git commit -qm "Capturas Tarea 4 (ejecucion #${GITHUB_RUN_NUMBER})"
+          git push -fq "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" evidencias-tarea4
+
+      # 4.5. Limpieza del servicio
+      - name: Detener y eliminar el contenedor
+        if: always()
+        run: |
+          docker stop app-produccion
+          docker rm app-produccion
+          docker ps -a
